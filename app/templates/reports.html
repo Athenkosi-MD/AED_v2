@@ -1,0 +1,376 @@
+{% extends "base.html" %}
+{% block title %}Reports – Edge Telematics{% endblock %}
+{% block page_title %}Driver Assignment Reports{% endblock %}
+{% block page_subtitle %}
+    {% if last_run %}Last synced {{ last_run.finished_at or last_run.started_at }} SAST — {{ last_run.trips_fetched }} trips fetched{% else %}No data loaded yet — run the pipeline to sync trips{% endif %}
+{% endblock %}
+
+{% block content %}
+{% set cur_role = session.get('role', '') %}
+
+<!-- ── KPI cards ───────────────────────────────────────────────────────── -->
+<div class="grid grid-4" style="margin-bottom:20px;">
+    <div class="stat-card accent">
+        <div class="stat-icon accent">
+            <svg width="20" height="20" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.8"><path d="M3 3v18h18"/><rect x="7" y="12" width="3" height="6"/><rect x="12.5" y="8" width="3" height="10"/><rect x="18" y="5" width="3" height="13"/></svg>
+        </div>
+        <div class="stat-label">Total Trips</div>
+        <div class="stat-value" id="kpiTotal">—</div>
+        <div class="stat-meta">In the current filter</div>
+    </div>
+    <div class="stat-card green">
+        <div class="stat-icon green">
+            <svg width="20" height="20" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.8"><path d="M20 6L9 17l-5-5"/></svg>
+        </div>
+        <div class="stat-label">Driver Identified</div>
+        <div class="stat-value" id="kpiAssigned" style="color:var(--success);">—</div>
+        <div class="stat-meta" id="kpiAssignedMeta">—</div>
+    </div>
+    <div class="stat-card warn">
+        <div class="stat-icon warn">
+            <svg width="20" height="20" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+        </div>
+        <div class="stat-label">Driver NOT Identified</div>
+        <div class="stat-value" id="kpiUnassigned" style="color:var(--danger);">—</div>
+        <div class="stat-meta" id="kpiUnassignedMeta">—</div>
+    </div>
+    <div class="stat-card blue">
+        <div class="stat-icon blue">
+            <svg width="20" height="20" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.8"><rect x="1" y="3" width="15" height="13" rx="2"/><polygon points="16 8 20 8 23 11 23 16 16 16 16 8"/><circle cx="5.5" cy="18.5" r="2.5"/><circle cx="18.5" cy="18.5" r="2.5"/></svg>
+        </div>
+        <div class="stat-label">Excluded (Trailers)</div>
+        <div class="stat-value" id="kpiExcluded">—</div>
+        <div class="stat-meta" id="kpiExcludedMeta">Towed units, no driver expected</div>
+    </div>
+</div>
+
+<!-- ── Filters ─────────────────────────────────────────────────────────── -->
+<div class="card filters-card" style="margin-bottom:20px;overflow:visible;position:relative;z-index:20;">
+    <div class="card-body" style="padding:18px 22px;">
+        <div style="display:flex;flex-wrap:wrap;gap:12px;align-items:flex-end;">
+            <div style="min-width:200px;">
+                <label class="form-label">Vehicle / Asset</label>
+                <div class="ms" id="fVehicle" data-all-label="All vehicles" data-noun="vehicles">
+                    <button type="button" class="form-control ms-toggle"><span class="ms-text">All vehicles</span><span class="ms-caret">▾</span></button>
+                    <div class="ms-panel">
+                        <input type="text" class="form-control ms-search" placeholder="Search vehicles...">
+                        <div class="ms-actions"><a href="#" data-act="all">Select all</a><a href="#" data-act="none">Clear</a></div>
+                        <div class="ms-list">
+                            {% for v in vehicles %}<label class="ms-opt"><input type="checkbox" value="{{ v }}"><span>{{ v }}</span></label>{% endfor %}
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div style="min-width:200px;">
+                <label class="form-label">Driver</label>
+                <div class="ms" id="fDriver" data-all-label="All drivers" data-noun="drivers">
+                    <button type="button" class="form-control ms-toggle"><span class="ms-text">All drivers</span><span class="ms-caret">▾</span></button>
+                    <div class="ms-panel">
+                        <input type="text" class="form-control ms-search" placeholder="Search drivers...">
+                        <div class="ms-actions"><a href="#" data-act="all">Select all</a><a href="#" data-act="none">Clear</a></div>
+                        <div class="ms-list">
+                            {% for d in drivers %}<label class="ms-opt"><input type="checkbox" value="{{ d }}"><span>{{ d }}</span></label>{% endfor %}
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div style="min-width:170px;">
+                <label class="form-label">Assignment Status</label>
+                <select class="form-control" id="fStatus">
+                    <option value="all">All trips</option>
+                    <option value="assigned">Trips with a driver</option>
+                    <option value="unassigned">Trips with no driver</option>
+                </select>
+            </div>
+            <div style="min-width:150px;">
+                <label class="form-label">From date</label>
+                <input type="date" class="form-control" id="fDateFrom">
+            </div>
+            <div style="min-width:150px;">
+                <label class="form-label">To date</label>
+                <input type="date" class="form-control" id="fDateTo">
+            </div>
+            <div style="flex:1;min-width:200px;">
+                <label class="form-label">Search</label>
+                <input type="text" class="form-control" id="fSearch" placeholder="Vehicle, driver or location...">
+            </div>
+        </div>
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-top:14px;flex-wrap:wrap;gap:10px;">
+            <label style="display:flex;align-items:center;gap:8px;font-size:12.5px;color:var(--text-dim);cursor:pointer;">
+                <input type="checkbox" id="fIncludeExcluded" style="width:15px;height:15px;">
+                Include trailers / towed units in the counts above
+            </label>
+            <div style="display:flex;gap:10px;">
+                <button class="btn btn-secondary" id="btnReset">Reset Filters</button>
+                <button class="btn btn-secondary" id="btnExportCsv">
+                    <svg width="13" height="13" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                    Export CSV
+                </button>
+                <button class="btn btn-primary" id="btnExportXlsx">
+                    <svg width="13" height="13" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                    Export Excel
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- ── Vehicles to Check ───────────────────────────────────────────────── -->
+<div class="card" style="margin-bottom:20px;">
+    <div class="card-header">
+        <div>
+            <div class="card-title">Vehicles to Check</div>
+            <div style="font-size:11.5px;color:var(--text-muted);margin-top:2px;">Ranked by trips with no driver identified — check cameras / the facial-recognition integration for these first</div>
+        </div>
+    </div>
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>Vehicle</th><th>Total Trips</th><th>Driver Identified</th>
+                    <th>Driver NOT Identified</th><th>% Not Identified</th><th>KM on Unmatched Trips</th>
+                </tr>
+            </thead>
+            <tbody id="vehiclesTableBody">
+                <tr><td colspan="6" style="text-align:center;color:var(--text-muted);padding:24px;">Loading…</td></tr>
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<!-- ── Trip list ───────────────────────────────────────────────────────── -->
+<div class="card">
+    <div class="card-header">
+        <div>
+            <div class="card-title">Trips</div>
+            <div style="font-size:11.5px;color:var(--text-muted);margin-top:2px;" id="tripsCountLabel">—</div>
+        </div>
+    </div>
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>Vehicle</th><th>Date</th><th>Start</th><th>End</th><th>Duration</th>
+                    <th>KM</th><th>Start Location</th><th>Driver</th><th>Status</th>
+                </tr>
+            </thead>
+            <tbody id="tripsTableBody">
+                <tr><td colspan="9" style="text-align:center;color:var(--text-muted);padding:24px;">Loading…</td></tr>
+            </tbody>
+        </table>
+    </div>
+    <div style="display:flex;align-items:center;justify-content:space-between;padding:14px 22px;border-top:1px solid var(--border-light);">
+        <div style="font-size:12px;color:var(--text-muted);" id="pageLabel">—</div>
+        <div style="display:flex;gap:8px;">
+            <button class="btn btn-secondary btn-sm" id="btnPrev">Previous</button>
+            <button class="btn btn-secondary btn-sm" id="btnNext">Next</button>
+        </div>
+    </div>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<style>
+.ms { position: relative; }
+.ms-toggle { display:flex; align-items:center; justify-content:space-between; gap:8px; text-align:left; cursor:pointer; }
+.ms-text { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.ms-caret { color: var(--text-muted); font-size: 11px; }
+.ms-panel { display:none; position:absolute; z-index:50; top:calc(100% + 4px); left:0; min-width:100%; width:280px;
+            background:var(--surface); border:1px solid var(--border); border-radius:8px; box-shadow:var(--shadow-md); padding:8px; }
+.ms.open .ms-panel { display:block; }
+.ms-search { margin-bottom:6px; padding:7px 10px; }
+.ms-actions { display:flex; justify-content:space-between; font-size:12px; padding:2px 4px 6px; border-bottom:1px solid var(--border-light); }
+.ms-actions a { color: var(--accent); text-decoration:none; }
+.ms-list { max-height:260px; overflow-y:auto; padding-top:4px; }
+.ms-opt { display:flex; align-items:center; gap:8px; padding:6px 6px; font-size:13px; border-radius:6px; cursor:pointer; }
+.ms-opt:hover { background: var(--accent-pale); }
+.ms-opt input { width:15px; height:15px; flex-shrink:0; }
+.ms-empty { font-size:12px; color:var(--text-muted); padding:8px 6px; }
+</style>
+<script>
+let currentPage = 1;
+const perPage = 25;
+
+// ── Multi-select dropdown ────────────────────────────────────────────────
+function msSelected(id) {
+    return [...document.querySelectorAll(`#${id} .ms-list input:checked`)].map(cb => cb.value);
+}
+function msUpdateLabel(el) {
+    const sel = msSelected(el.id);
+    const text = el.querySelector('.ms-text');
+    if (!sel.length) text.textContent = el.dataset.allLabel;
+    else if (sel.length <= 2) text.textContent = sel.join(', ');
+    else text.textContent = `${sel.length} ${el.dataset.noun} selected`;
+    el.querySelector('.ms-toggle').title = sel.join('\n');
+}
+function msClear(id) {
+    const el = document.getElementById(id);
+    el.querySelectorAll('.ms-list input').forEach(cb => cb.checked = false);
+    el.querySelector('.ms-search').value = '';
+    el.querySelectorAll('.ms-opt').forEach(o => o.style.display = '');
+    msUpdateLabel(el);
+}
+document.querySelectorAll('.ms').forEach(el => {
+    const list = el.querySelector('.ms-list');
+    const search = el.querySelector('.ms-search');
+    if (!list.querySelector('.ms-opt')) list.innerHTML = '<div class="ms-empty">No options available.</div>';
+    el.querySelector('.ms-toggle').addEventListener('click', () => {
+        document.querySelectorAll('.ms.open').forEach(o => { if (o !== el) o.classList.remove('open'); });
+        el.classList.toggle('open');
+        if (el.classList.contains('open')) search.focus();
+    });
+    search.addEventListener('input', () => {
+        const term = search.value.trim().toLowerCase();
+        el.querySelectorAll('.ms-opt').forEach(o => {
+            o.style.display = o.textContent.toLowerCase().includes(term) ? '' : 'none';
+        });
+    });
+    list.addEventListener('change', () => { msUpdateLabel(el); refreshAll(); });
+    el.querySelectorAll('.ms-actions a').forEach(a => a.addEventListener('click', e => {
+        e.preventDefault();
+        // "Select all" only ticks the options visible under the current search
+        const check = a.dataset.act === 'all';
+        el.querySelectorAll('.ms-opt').forEach(o => {
+            if (o.style.display !== 'none') o.querySelector('input').checked = check;
+        });
+        msUpdateLabel(el);
+        refreshAll();
+    }));
+});
+document.addEventListener('click', e => {
+    document.querySelectorAll('.ms.open').forEach(o => { if (!o.contains(e.target)) o.classList.remove('open'); });
+});
+document.addEventListener('keydown', e => {
+    if (e.key === 'Escape') document.querySelectorAll('.ms.open').forEach(o => o.classList.remove('open'));
+});
+
+function currentFilters() {
+    return {
+        vehicle: msSelected('fVehicle'),
+        driver: msSelected('fDriver'),
+        status: document.getElementById('fStatus').value,
+        date_from: document.getElementById('fDateFrom').value,
+        date_to: document.getElementById('fDateTo').value,
+        search: document.getElementById('fSearch').value,
+        include_excluded: document.getElementById('fIncludeExcluded').checked ? '1' : '0',
+    };
+}
+
+function qs(params) {
+    // Arrays become repeated params: vehicle=A&vehicle=B
+    return Object.entries(params)
+        .flatMap(([k, v]) => (Array.isArray(v) ? v : [v]).map(x => [k, x]))
+        .filter(([k, v]) => v !== '' && v !== undefined && v !== null)
+        .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`).join('&');
+}
+
+function loadSummary() {
+    fetch('/api/reports/summary?' + qs(currentFilters()))
+        .then(r => r.json())
+        .then(d => {
+            document.getElementById('kpiTotal').textContent = d.total_trips.toLocaleString();
+            document.getElementById('kpiAssigned').textContent = d.assigned_count.toLocaleString();
+            document.getElementById('kpiAssignedMeta').textContent =
+                `${(d.assigned_pct * 100).toFixed(0)}% · ${d.assigned_km.toLocaleString()} km`;
+            document.getElementById('kpiUnassigned').textContent = d.unassigned_count.toLocaleString();
+            document.getElementById('kpiUnassignedMeta').textContent =
+                `${(d.unassigned_pct * 100).toFixed(0)}% · ${d.unassigned_km.toLocaleString()} km · ${d.unassigned_duration}`;
+            document.getElementById('kpiExcluded').textContent = d.excluded_count.toLocaleString();
+            document.getElementById('kpiExcludedMeta').textContent =
+                `${d.excluded_vehicles} vehicle(s), not counted above`;
+        });
+}
+
+function loadVehicles() {
+    fetch('/api/reports/vehicles?' + qs(currentFilters()))
+        .then(r => r.json())
+        .then(d => {
+            const body = document.getElementById('vehiclesTableBody');
+            if (!d.vehicles.length) {
+                body.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--text-muted);padding:24px;">No vehicles match these filters.</td></tr>';
+                return;
+            }
+            body.innerHTML = d.vehicles.map(v => `
+                <tr style="${v.unassigned > 0 ? 'background:#fdeded;' : ''}">
+                    <td><strong>${v.vehicle}</strong></td>
+                    <td>${v.total_trips}</td>
+                    <td>${v.assigned}</td>
+                    <td>${v.unassigned}</td>
+                    <td>${(v.pct_unassigned * 100).toFixed(0)}%</td>
+                    <td>${v.unassigned_km.toLocaleString()} km</td>
+                </tr>`).join('');
+        });
+}
+
+function loadTrips() {
+    const params = Object.assign(currentFilters(), { page: currentPage, per_page: perPage });
+    fetch('/api/reports/trips?' + qs(params))
+        .then(r => r.json())
+        .then(d => {
+            const body = document.getElementById('tripsTableBody');
+            if (!d.rows.length) {
+                body.innerHTML = '<tr><td colspan="9" style="text-align:center;color:var(--text-muted);padding:24px;">No trips match these filters.</td></tr>';
+            } else {
+                body.innerHTML = d.rows.map(t => `
+                    <tr>
+                        <td><strong>${t.vehicle}</strong></td>
+                        <td>${t.start_time ? t.start_time.split(' ')[0] : ''}</td>
+                        <td>${t.start_time ? t.start_time.split(' ')[1] : ''}</td>
+                        <td>${t.end_time ? t.end_time.split(' ')[1] : ''}</td>
+                        <td>${t.duration_min !== null ? Math.round(t.duration_min) + ' min' : '—'}</td>
+                        <td>${t.km !== null ? t.km.toLocaleString() + ' km' : '—'}</td>
+                        <td>${t.start_zone_name || t.start_location || '<span style="color:var(--text-muted);">—</span>'}</td>
+                        <td>${t.driver_name || '<span style="color:var(--text-muted);">—</span>'}</td>
+                        <td>${t.has_driver
+                            ? '<span class="badge badge-success">Identified</span>'
+                            : '<span class="badge badge-danger">Not Identified</span>'}</td>
+                    </tr>`).join('');
+            }
+            document.getElementById('tripsCountLabel').textContent = `${d.total.toLocaleString()} trip(s) match the current filters`;
+            document.getElementById('pageLabel').textContent = `Page ${d.page} of ${d.pages}`;
+            document.getElementById('btnPrev').disabled = d.page <= 1;
+            document.getElementById('btnNext').disabled = d.page >= d.pages;
+        });
+}
+
+function refreshAll() {
+    currentPage = 1;
+    loadSummary();
+    loadVehicles();
+    loadTrips();
+}
+
+['fStatus', 'fDateFrom', 'fDateTo', 'fIncludeExcluded'].forEach(id => {
+    document.getElementById(id).addEventListener('change', refreshAll);
+});
+let searchTimer;
+document.getElementById('fSearch').addEventListener('input', () => {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(refreshAll, 350);
+});
+
+document.getElementById('btnReset').addEventListener('click', () => {
+    msClear('fVehicle');
+    msClear('fDriver');
+    document.getElementById('fStatus').value = 'all';
+    document.getElementById('fDateFrom').value = '';
+    document.getElementById('fDateTo').value = '';
+    document.getElementById('fSearch').value = '';
+    document.getElementById('fIncludeExcluded').checked = false;
+    refreshAll();
+});
+
+document.getElementById('btnPrev').addEventListener('click', () => { if (currentPage > 1) { currentPage--; loadTrips(); } });
+document.getElementById('btnNext').addEventListener('click', () => { currentPage++; loadTrips(); });
+
+document.getElementById('btnExportCsv').addEventListener('click', () => {
+    window.location.href = '/api/reports/export?format=csv&' + qs(currentFilters());
+});
+document.getElementById('btnExportXlsx').addEventListener('click', () => {
+    window.location.href = '/api/reports/export?format=xlsx&' + qs(currentFilters());
+});
+
+refreshAll();
+</script>
+{% endblock %}
